@@ -36,6 +36,86 @@ namespace Il2CppDumper
             il2Cpp = il2CppExecutor.il2Cpp;
         }
 
+        public class ImageInfo
+        {
+            public string Name;
+
+            public readonly List<TypeInfo> Types = new List<TypeInfo>();
+
+            public override string ToString()
+            {
+                return $"{Name}: {Types.Count} types";
+            }
+        }
+
+        public class TypeInfo
+        {
+            public TypeInfo DeclaringClass;
+            public string Name;
+            public string Namespace;
+            public readonly List<FieldInfo> Fields = new List<FieldInfo>();
+            public readonly List<MethodInfo> Methods = new List<MethodInfo>();
+
+            public string FullName =>
+                string.IsNullOrEmpty(Namespace)
+                    ? Name
+                    : $"{Namespace}.{Name}";
+
+            public override string ToString()
+            {
+                return FullName;
+            }
+        }
+        
+        public class Il2CppTypeInfo
+        {
+            public string FullCSharpName;
+            public string FullNativeName;
+            public bool IsVoid;
+
+            public override string ToString()
+            {
+                return $"{FullCSharpName}";
+            }
+        }
+        
+        public class MethodInfo
+        {
+            public string Name;
+            public bool Static;
+            public Il2CppTypeInfo ReturnType;
+            public readonly List<ParameterInfo> Parameters = new List<ParameterInfo>();
+
+            public override string ToString()
+            {
+                string parameters = string.Join(", ", Parameters.ConvertAll(it => it.ToString()));
+                return $"{(Static ? "static " : "")}{ReturnType.FullCSharpName} {Name}({parameters})";
+            }
+        }
+
+        public class FieldInfo
+        {
+            public string Name;
+            public bool Static;
+            public Il2CppTypeInfo Type;
+
+            public override string ToString()
+            {
+                return $"{Type.FullCSharpName} {Name}";
+            }
+        }
+
+        public class ParameterInfo
+        {
+            public string Name;
+            public Il2CppTypeInfo Type;
+
+            public override string ToString()
+            {
+                return $"{Type.FullCSharpName} {Name}";
+            }
+        }
+
         public void WriteScript(string outputDir)
         {
             var json = new ScriptJson();
@@ -369,9 +449,363 @@ namespace Il2CppDumper
             sb.Append(arrayClassHeader);
             sb.Append(methodInfoHeader);
             File.WriteAllText(outputDir + "il2cpp.h", sb.ToString());
+            
+            WriteTlInfo(outputDir);
         }
 
-        private static string FixName(string str)
+        private void WriteTlInfo(string outputDir)
+        {
+            var images = new List<ImageInfo>();
+            foreach (Il2CppImageDefinition imageDefinition in metadata.imageDefs)
+            {
+                var imageInfo = ParseImageInfo(imageDefinition);
+                images.Add(imageInfo);
+            }
+
+            var dumper = new TlApiDumper();
+            using (var writer = new StreamWriter(Path.Combine(outputDir, "tl_api.h"), false, Encoding.UTF8))
+            {
+                dumper.DumpHeader(writer, string.Empty);
+                writer.WriteLine();
+                writer.WriteLine();
+                
+                foreach (var image in images)
+                {
+                    dumper.Dump(image, writer, string.Empty);
+                    writer.WriteLine();
+                    writer.WriteLine();
+                }
+            }
+            
+            // todo: remove after testing
+            Environment.Exit(0);
+        }
+
+        private readonly Dictionary<Il2CppImageDefinition, ImageInfo> parsedImages = new Dictionary<Il2CppImageDefinition, ImageInfo>();
+        private readonly Dictionary<Il2CppTypeDefinition, TypeInfo> parsedTypes = new Dictionary<Il2CppTypeDefinition, TypeInfo>();
+        private readonly Dictionary<Il2CppFieldDefinition, FieldInfo> parsedFields = new Dictionary<Il2CppFieldDefinition, FieldInfo>();
+        private readonly Dictionary<Il2CppMethodDefinition, MethodInfo> parsedMethods = new Dictionary<Il2CppMethodDefinition, MethodInfo>();
+        private readonly Dictionary<Il2CppParameterDefinition, ParameterInfo> parsedParameters = new Dictionary<Il2CppParameterDefinition, ParameterInfo>();
+        private readonly Dictionary<Il2CppType, Il2CppTypeInfo> parsedIl2CppTypes = new Dictionary<Il2CppType, Il2CppTypeInfo>();
+        
+        private ImageInfo ParseImageInfo(Il2CppImageDefinition imageDefinition)
+        {
+            if (parsedImages.TryGetValue(imageDefinition, out var parsedImage))
+                return parsedImage;
+            
+            var imageInfo = new ImageInfo();
+            parsedImages[imageDefinition] = imageInfo;
+
+            imageInfo.Name = metadata.GetStringFromIndex(imageDefinition.nameIndex);
+            for (long i = 0; i < imageDefinition.typeCount; i++)
+            {
+                var typeInfo = ParseTypeInfo(metadata.typeDefs[imageDefinition.typeStart + i]);
+                imageInfo.Types.Add(typeInfo);
+            }
+
+            return imageInfo;
+        }
+        
+        private TypeInfo ParseTypeInfo(Il2CppTypeDefinition typeDefinition)
+        {
+            if (parsedTypes.TryGetValue(typeDefinition, out var parsedType))
+                return parsedType;
+            
+            var typeInfo = new TypeInfo();
+            parsedTypes[typeDefinition] = typeInfo;
+
+            // todo: check `genericContainerIndex` for generic types
+            if (typeDefinition.declaringTypeIndex != -1)
+                typeInfo.DeclaringClass = ParseTypeInfo(metadata.typeDefs[il2Cpp.types[typeDefinition.declaringTypeIndex].data.klassIndex]);
+            typeInfo.Name = metadata.GetStringFromIndex(typeDefinition.nameIndex);
+            typeInfo.Namespace = metadata.GetStringFromIndex(typeDefinition.namespaceIndex);
+
+            for (var i = 0; i < typeDefinition.field_count; i++)
+            {
+                var fieldInfo = ParseFieldInfo(metadata.fieldDefs[typeDefinition.fieldStart + i]);
+                typeInfo.Fields.Add(fieldInfo);
+            }
+            for (var i = 0; i < typeDefinition.method_count; i++)
+            {
+                var methodInfo = ParseMethodInfo(metadata.methodDefs[typeDefinition.methodStart + i]);
+                typeInfo.Methods.Add(methodInfo);
+            }
+
+            return typeInfo;
+        }
+        
+        private Il2CppTypeInfo ParseIl2CppTypeInfo(Il2CppType il2CppType, Il2CppGenericContext context = null)
+        {
+            if (parsedIl2CppTypes.TryGetValue(il2CppType, out var parsedType))
+                return parsedType;
+
+            var il2CppTypeInfo = new Il2CppTypeInfo();
+            parsedIl2CppTypes[il2CppType] = il2CppTypeInfo;
+
+            il2CppTypeInfo.FullCSharpName = GetCSharpIl2CppTypeName(il2CppType, context);
+            il2CppTypeInfo.FullNativeName = GetNativeIl2CppTypeName(il2CppType, context);
+            il2CppTypeInfo.IsVoid = il2CppType.type == Il2CppTypeEnum.IL2CPP_TYPE_VOID;
+            
+            return il2CppTypeInfo;
+        }
+
+        private MethodInfo ParseMethodInfo(Il2CppMethodDefinition methodDefinition)
+        {
+            if (parsedMethods.TryGetValue(methodDefinition, out var parsedMethod))
+                return parsedMethod;
+            
+            var methodInfo = new MethodInfo();
+            parsedMethods[methodDefinition] = methodInfo;
+                        
+            methodInfo.Name = metadata.GetStringFromIndex(methodDefinition.nameIndex);
+            methodInfo.Static = (methodDefinition.flags & METHOD_ATTRIBUTE_STATIC) != 0;
+            methodInfo.ReturnType = ParseIl2CppTypeInfo(il2Cpp.types[methodDefinition.returnType]);
+            for (int i = 0; i < methodDefinition.parameterCount; i++)
+            {
+                ParameterInfo parameterInfo = ParseParameterInfo(metadata.parameterDefs[methodDefinition.parameterStart + i]);
+                methodInfo.Parameters.Add(parameterInfo);
+            }
+
+            return methodInfo;
+        }
+        
+        private FieldInfo ParseFieldInfo(Il2CppFieldDefinition fieldDefinition)
+        {
+            if (parsedFields.TryGetValue(fieldDefinition, out var parsedField))
+                return parsedField;
+            
+            var fieldInfo = new FieldInfo();
+            parsedFields[fieldDefinition] = fieldInfo;
+
+            Il2CppType type = il2Cpp.types[fieldDefinition.typeIndex];
+            fieldInfo.Name = metadata.GetStringFromIndex(fieldDefinition.nameIndex);
+            fieldInfo.Static = (type.attrs & FIELD_ATTRIBUTE_STATIC) != 0;
+            fieldInfo.Type = ParseIl2CppTypeInfo(type);
+
+            return fieldInfo;
+        }
+        
+        private ParameterInfo ParseParameterInfo(Il2CppParameterDefinition parameterDefinition)
+        {
+            if (parsedParameters.TryGetValue(parameterDefinition, out var parsedParameter))
+                return parsedParameter;
+            
+            var parameterInfo = new ParameterInfo();
+            parsedParameters[parameterDefinition] = parameterInfo;
+
+            parameterInfo.Name = metadata.GetStringFromIndex(parameterDefinition.nameIndex);
+            parameterInfo.Type = ParseIl2CppTypeInfo(il2Cpp.types[parameterDefinition.typeIndex]);
+
+            return parameterInfo;
+        }
+        
+        private string GetCSharpIl2CppTypeName(Il2CppType il2CppType, Il2CppGenericContext context = null)
+        {
+            switch (il2CppType.type)
+            {
+                case Il2CppTypeEnum.IL2CPP_TYPE_VOID:
+                    return "void";
+                case Il2CppTypeEnum.IL2CPP_TYPE_BOOLEAN:
+                    return "bool";
+                case Il2CppTypeEnum.IL2CPP_TYPE_CHAR:
+                    return "char"; //Il2CppChar
+                case Il2CppTypeEnum.IL2CPP_TYPE_I1:
+                    return "sbyte";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U1:
+                    return "byte";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I2:
+                    return "short";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U2:
+                    return "ushort";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I4:
+                    return "int";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U4:
+                    return "uint";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I8:
+                    return "long";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U8:
+                    return "ulong";
+                case Il2CppTypeEnum.IL2CPP_TYPE_R4:
+                    return "float";
+                case Il2CppTypeEnum.IL2CPP_TYPE_R8:
+                    return "double";
+                case Il2CppTypeEnum.IL2CPP_TYPE_STRING:
+                    return "string";
+                case Il2CppTypeEnum.IL2CPP_TYPE_PTR:
+                    {
+                        var oriType = il2Cpp.GetIl2CppType(il2CppType.data.type);
+                        return GetCSharpIl2CppTypeName(oriType);
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_VALUETYPE:
+                case Il2CppTypeEnum.IL2CPP_TYPE_CLASS:
+                    {
+                        TypeInfo typeInfo = ParseTypeInfo(metadata.typeDefs[il2CppType.data.klassIndex]);
+                        return typeInfo.FullName;
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_VAR:
+                    {
+                        if (context == null)
+                            return "object";
+
+                        var genericParameter = metadata.genericParameters[il2CppType.data.genericParameterIndex];
+                        var genericInst = il2Cpp.MapVATR<Il2CppGenericInst>(context.class_inst);
+                        var pointers = il2Cpp.MapVATR<ulong>(genericInst.type_argv, genericInst.type_argc);
+                        var pointer = pointers[genericParameter.num];
+                        var type = il2Cpp.GetIl2CppType(pointer);
+                        return GetCSharpIl2CppTypeName(type);
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_ARRAY:
+                    {
+                        var arrayType = il2Cpp.MapVATR<Il2CppArrayType>(il2CppType.data.array);
+                        var elementType = il2Cpp.GetIl2CppType(arrayType.etype);
+                        var typeStructName = GetCSharpIl2CppTypeName(elementType);
+                        return typeStructName + "[]";
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_GENERICINST:
+                    {
+                        var genericClass = il2Cpp.MapVATR<Il2CppGenericClass>(il2CppType.data.generic_class);
+                        var typeDef = executor.GetGenericClassTypeDefinition(genericClass);
+                        var typeStructName = genericClassStructNameDic[il2CppType.data.generic_class];
+                        if (typeDef.IsValueType)
+                        {
+                            if (typeDef.IsEnum)
+                            {
+                                return GetCSharpIl2CppTypeName(il2Cpp.types[typeDef.elementTypeIndex]);
+                            }
+                            return typeStructName + "_o";
+                        }
+                        return typeStructName + "_o*";
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_TYPEDBYREF:
+                    return "ref object";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I:
+                    return "IntPtr";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U:
+                    return "UIntPtr";
+                case Il2CppTypeEnum.IL2CPP_TYPE_OBJECT:
+                    return "object";
+                case Il2CppTypeEnum.IL2CPP_TYPE_SZARRAY:
+                    {
+                        var elementType = il2Cpp.GetIl2CppType(il2CppType.data.type);
+                        string typeStructName = GetCSharpIl2CppTypeName(elementType);;
+                        return typeStructName + "[]";
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_MVAR:
+                    {
+                        if (context != null)
+                        {
+                            var genericParameter = metadata.genericParameters[il2CppType.data.genericParameterIndex];
+                            var genericInst = il2Cpp.MapVATR<Il2CppGenericInst>(context.method_inst);
+                            var pointers = il2Cpp.MapVATR<ulong>(genericInst.type_argv, genericInst.type_argc);
+                            var pointer = pointers[genericParameter.num];
+                            var type = il2Cpp.GetIl2CppType(pointer);
+                            return GetCSharpIl2CppTypeName(type);
+                        }
+                        return "object";
+                    }
+                default:
+                    throw new NotSupportedException();
+            }
+        }
+        
+        private string GetNativeIl2CppTypeName(Il2CppType il2CppType, Il2CppGenericContext context = null)
+        {
+            switch (il2CppType.type)
+            {
+                case Il2CppTypeEnum.IL2CPP_TYPE_VOID:
+                    return "void";
+                case Il2CppTypeEnum.IL2CPP_TYPE_BOOLEAN:
+                    return "un_bool";
+                case Il2CppTypeEnum.IL2CPP_TYPE_CHAR:
+                    return "un_char"; //Il2CppChar
+                case Il2CppTypeEnum.IL2CPP_TYPE_I1:
+                    return "un_sbyte";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U1:
+                    return "un_byte";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I2:
+                    return "un_short";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U2:
+                    return "un_ushort";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I4:
+                    return "un_int";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U4:
+                    return "un_uint";
+                case Il2CppTypeEnum.IL2CPP_TYPE_I8:
+                    return "un_long";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U8:
+                    return "un_ulong";
+                case Il2CppTypeEnum.IL2CPP_TYPE_R4:
+                    return "un_float";
+                case Il2CppTypeEnum.IL2CPP_TYPE_R8:
+                    return "un_double";
+                case Il2CppTypeEnum.IL2CPP_TYPE_STRING:
+                    return "un_string*";
+                case Il2CppTypeEnum.IL2CPP_TYPE_PTR:
+                case Il2CppTypeEnum.IL2CPP_TYPE_CLASS:
+                case Il2CppTypeEnum.IL2CPP_TYPE_ARRAY:
+                case Il2CppTypeEnum.IL2CPP_TYPE_TYPEDBYREF:
+                case Il2CppTypeEnum.IL2CPP_TYPE_OBJECT:
+                case Il2CppTypeEnum.IL2CPP_TYPE_SZARRAY:
+                    return "void*";
+                case Il2CppTypeEnum.IL2CPP_TYPE_VALUETYPE:
+                    {
+                        var typeDef = metadata.typeDefs[il2CppType.data.klassIndex];
+                        if (typeDef.IsEnum)
+                        {
+                            return GetNativeIl2CppTypeName(il2Cpp.types[typeDef.elementTypeIndex]);
+                        }
+                        return structNameDic[typeDef] + "_o";
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_VAR:
+                    {
+                        if (context == null)
+                            return "void*";
+
+                        var genericParameter = metadata.genericParameters[il2CppType.data.genericParameterIndex];
+                        var genericInst = il2Cpp.MapVATR<Il2CppGenericInst>(context.class_inst);
+                        var pointers = il2Cpp.MapVATR<ulong>(genericInst.type_argv, genericInst.type_argc);
+                        var pointer = pointers[genericParameter.num];
+                        var type = il2Cpp.GetIl2CppType(pointer);
+                        return GetNativeIl2CppTypeName(type);
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_GENERICINST:
+                    {
+                        var genericClass = il2Cpp.MapVATR<Il2CppGenericClass>(il2CppType.data.generic_class);
+                        var typeDef = executor.GetGenericClassTypeDefinition(genericClass);
+                        var typeStructName = genericClassStructNameDic[il2CppType.data.generic_class];
+                        
+                        if (!typeDef.IsValueType)
+                            return "void*";
+                        
+                        if (typeDef.IsEnum)
+                        {
+                            return GetNativeIl2CppTypeName(il2Cpp.types[typeDef.elementTypeIndex]);
+                        }
+                        return typeStructName + "_o";
+                    }
+                case Il2CppTypeEnum.IL2CPP_TYPE_I:
+                    return "intptr_t";
+                case Il2CppTypeEnum.IL2CPP_TYPE_U:
+                    return "uintptr_t";
+                case Il2CppTypeEnum.IL2CPP_TYPE_MVAR:
+                    {
+                        if (context != null)
+                        {
+                            var genericParameter = metadata.genericParameters[il2CppType.data.genericParameterIndex];
+                            var genericInst = il2Cpp.MapVATR<Il2CppGenericInst>(context.method_inst);
+                            var pointers = il2Cpp.MapVATR<ulong>(genericInst.type_argv, genericInst.type_argc);
+                            var pointer = pointers[genericParameter.num];
+                            var type = il2Cpp.GetIl2CppType(pointer);
+                            return GetNativeIl2CppTypeName(type);
+                        }
+                        return "void*";
+                    }
+                default:
+                    throw new NotSupportedException();
+            }
+        }
+        
+        public static string FixName(string str)
         {
             if (keyword.Contains(str))
             {
