@@ -8,8 +8,11 @@ namespace Il2CppDumper
     public class TlApiDumper
     {
         private const string HEADER = 
-            @"// unity primitives
+            @"#include ""il2cpp.h""
+
+            // unity primitives
             using un_bool   = int8_t;
+            using un_char   = uint16_t;
             using un_sbyte  = int8_t;
             using un_byte   = uint8_t;
             using un_short  = int16_t;
@@ -22,7 +25,9 @@ namespace Il2CppDumper
             using un_double = double;
 
             // common unity types 
-            using un_string = System_String_o;";
+            using un_string = System_String_o;
+
+            using namespace ModsApi::Classes;";
 
         public void DumpHeader(TextWriter writer, string indentation)
         {
@@ -36,12 +41,15 @@ namespace Il2CppDumper
         
         public void Dump(ScriptGenerator.ImageInfo image, TextWriter writer, string indentation)
         {
+            writer.WriteLine("{0}namespace {1} {{", indentation, ScriptGenerator.FixName(image.Name));
+            string innerIndentation = "    " + indentation;
             foreach (ScriptGenerator.TypeInfo type in image.Types)
             {
-                Dump(type, writer, indentation);
+                Dump(type, writer, innerIndentation);
                 writer.WriteLine();
                 writer.WriteLine();
             }
+            writer.Write('}');
         }
         
         public void Dump(ScriptGenerator.TypeInfo type, TextWriter writer, string indentation)
@@ -55,6 +63,7 @@ namespace Il2CppDumper
                     type.FullName
                         .Split('.')
                         .Select(ScriptGenerator.FixName)
+                        .Select(it => it == string.Empty ? "_" : it)
                 );
                 writer.WriteLine($"{indentation}namespace {@namespace} {{");
                 writer.Write($"{innerIndentation}inline");
@@ -77,6 +86,7 @@ namespace Il2CppDumper
                     tree[0].Namespace
                         .Split('.')
                         .Select(ScriptGenerator.FixName)
+                        .Select(it => it == string.Empty ? "_" : it)
                 ) + "::" + classesTree;
                 writer.WriteLine($"{indentation}namespace {@namespace} {{");
                 writer.Write($"{innerIndentation}inline");
@@ -176,7 +186,7 @@ namespace Il2CppDumper
             // example: "    inline StaticField<string> SomeField(classLoader, "SomeField");"
             writer.Write(
                 "{0}inline {1}Field<{2}> {3}(classLoader, \"{4}\");",
-                indentation, field.Static ? "Static" : "Instance", field.Type.FullNativeName, field.Name, field.Name
+                indentation, field.Static ? "Static" : "Instance", field.Type.FullNativeName, ScriptGenerator.FixName(field.Name), field.Name
             );
         }
         
@@ -200,19 +210,11 @@ namespace Il2CppDumper
         public void DumpNativeHolder(ScriptGenerator.MethodInfo method, string uniqueMethodName, TextWriter writer, string indentation)
         {
             writer.Write(
-                "{0}inline {1}",
-                indentation, method.Static ? "Static" : "Instance"
+                "{0}inline {1}Method<{2}",
+                indentation, method.Static ? "Static" : "Instance", method.ReturnType.IsVoid ? "void" : method.ReturnType.FullNativeName
             );
-            if (method.ReturnType.IsVoid)
-            {
-                writer.Write("VoidMethod<");
-            }
-            else
-            {
-                writer.Write($"Method<{method.ReturnType.FullNativeName}");
-                if (method.Parameters.Count > 0)
-                    writer.Write(", ");
-            }
+            if (method.Parameters.Count > 0)
+                writer.Write(", ");
 
             string parameters = string.Join(", ", method.Parameters.Select(it => it.Type.FullNativeName));
             writer.Write(
