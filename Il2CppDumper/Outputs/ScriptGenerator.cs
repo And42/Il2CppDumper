@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using Il2CppDumper.Outputs;
 using static Il2CppDumper.Il2CppConstants;
 
 namespace Il2CppDumper
