@@ -461,22 +461,9 @@ namespace Il2CppDumper
                 var imageInfo = ParseImageInfo(imageDefinition);
                 images.Add(imageInfo);
             }
-
-            var dumper = new TlApiDumper();
-            using (var writer = new StreamWriter(Path.Combine(outputDir, "tl_api.h"), false, Encoding.UTF8))
-            {
-                dumper.DumpHeader(writer, string.Empty);
-                writer.WriteLine();
-                writer.WriteLine();
-                
-                foreach (var image in images)
-                {
-                    dumper.Dump(image, writer, string.Empty);
-                    writer.WriteLine();
-                    writer.WriteLine();
-                }
-            }
             
+            new TlApiDumper().Dump(images, Path.Combine(outputDir, "tl_api"));
+
             // todo: remove after testing
             Environment.Exit(0);
         }
